@@ -3,6 +3,8 @@ using Elastic.Ingest.Elasticsearch;
 using Elastic.Ingest.Elasticsearch.DataStreams;
 using Elastic.Serilog.Sinks;
 using Elastic.Transport;
+using OpenTelemetry;
+using OpenTelemetry.Resources;
 using Serilog;
 
 Log.Logger = new LoggerConfiguration()
@@ -12,26 +14,40 @@ Log.Logger = new LoggerConfiguration()
 try                     
 {
     var builder = WebApplication.CreateBuilder(args);
-    builder.Host.UseSerilog();
-    builder.Services.AddSerilog((_, lc) => lc.Enrich.FromLogContext()
-        .WriteTo.Elasticsearch([new Uri("http://localhost:9200")], opts =>
-        {
-            opts.DataStream = new DataStreamName("logs", "telemetry-loggin", "demo");
-            opts.BootstrapMethod = BootstrapMethod.Failure;
-            opts.ConfigureChannel = channelOpts =>
+
+    // true — логи уходят через OpenTelemetry (OTLP), Serilog отключён; false — работает Serilog (задания 1–3)
+    var useOpenTelemetry = builder.Configuration.GetValue<bool>("UseOpenTelemetry");
+
+    if (useOpenTelemetry)
+    {
+        builder.Services.AddOpenTelemetry()
+            .ConfigureResource(r => r.AddService("telemetry-logging-anton"))
+            .WithLogging()
+            .UseOtlpExporter();
+    }
+    else
+    {
+        builder.Host.UseSerilog();
+        builder.Services.AddSerilog((_, lc) => lc.Enrich.FromLogContext()
+            .WriteTo.Elasticsearch([new Uri("http://localhost:9200")], opts =>
             {
-                channelOpts.BufferOptions = new BufferOptions
+                opts.DataStream = new DataStreamName("logs", "telemetry-loggin", "demo");
+                opts.BootstrapMethod = BootstrapMethod.Failure;
+                opts.ConfigureChannel = channelOpts =>
                 {
-                    ExportMaxConcurrency = 10
+                    channelOpts.BufferOptions = new BufferOptions
+                    {
+                        ExportMaxConcurrency = 10
+                    };
                 };
-            };
-        }, transport =>
-        {
-            transport.Authentication(new BasicAuthentication("elastic", "changeme"));
-            transport.OnRequestCompleted(d => Console.WriteLine($"es-req: {d.DebugInformation}"));
-        })
-        .Enrich.WithProperty("Environment", builder.Environment.EnvironmentName)
-        .ReadFrom.Configuration(builder.Configuration));
+            }, transport =>
+            {
+                transport.Authentication(new BasicAuthentication("elastic", "changeme"));
+                transport.OnRequestCompleted(d => Console.WriteLine($"es-req: {d.DebugInformation}"));
+            })
+            .Enrich.WithProperty("Environment", builder.Environment.EnvironmentName)
+            .ReadFrom.Configuration(builder.Configuration));
+    }
     // Add services to the container.
     builder.Services.AddRazorPages();
 
@@ -48,7 +64,10 @@ try
     app.UseHttpsRedirection();
     app.UseStaticFiles();
 
-    app.UseSerilogRequestLogging();
+    if (!useOpenTelemetry)
+    {
+        app.UseSerilogRequestLogging();
+    }
 
     app.UseRouting();
 
